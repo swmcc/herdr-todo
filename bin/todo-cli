@@ -1,0 +1,9 @@
+#!/bin/sh
+# todo-cli: finds my todo CLI (PATH first, then ~/Code/todo) and runs it.
+if command -v todo >/dev/null 2>&1; then
+  exec todo "$@"
+elif [ -x "$HOME/Code/todo/bin/todo" ]; then
+  exec "$HOME/Code/todo/bin/todo" "$@"
+fi
+echo "todo-cli: can't find the todo CLI (looked on PATH and in ~/Code/todo/bin)" >&2
+exit 127

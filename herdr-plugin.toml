@@ -1,0 +1,42 @@
+id = "swmcc.todo"
+name = "Todo"
+version = "0.1.0"
+min_herdr_version = "0.9.1"
+description = "My to-do list (swmcc/todo) in a searchable popup"
+platforms = ["macos", "linux"]
+
+# The list. fzf inside a popup; it refreshes itself, because plugins can't run daemons.
+[[panes]]
+id = "list"
+title = "Todo"
+placement = "popup"
+width = "90%"
+height = "90%"
+command = ["bin/todo-pane"]
+
+# A small popup for adding a task without opening the list.
+[[panes]]
+id = "add"
+title = "Todo: add"
+placement = "popup"
+width = 80
+height = 30
+command = ["bin/todo-add"]
+
+[[actions]]
+id = "show"
+title = "Todo: show my list"
+contexts = ["global"]
+command = ["sh", "-c", "exec \"$HERDR_BIN_PATH\" plugin pane open --plugin swmcc.todo --entrypoint list --focus"]
+
+[[actions]]
+id = "add"
+title = "Todo: add"
+contexts = ["global"]
+command = ["sh", "-c", "exec \"$HERDR_BIN_PATH\" plugin pane open --plugin swmcc.todo --entrypoint add --focus"]
+
+[[actions]]
+id = "web"
+title = "Todo: open in browser"
+contexts = ["global"]
+command = ["bin/todo-cli", "web"]

@@ -1,0 +1,20 @@
+#!/bin/sh
+# todo-done N: asks for an optional note, then closes task N as done.
+set -u
+BIN=$(cd "$(dirname "$0")" && pwd)
+STATE="${HERDR_PLUGIN_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-todo}"
+n="${1:?which number?}"
+
+title=$(awk -F '\t' -v n="$n" '$1 == n { print $3; exit }' "$STATE/list.tsv" 2>/dev/null)
+clear
+printf '\n  ✅ \033[1mDone: #%s %s\033[0m\n\n' "$n" "$title"
+printf '  \033[2mNote (optional). Enter to finish, ctrl-c to cancel.\033[0m\n\n  › '
+read -r note || exit 0
+
+if [ -n "$note" ]; then out=$("$BIN/todo-cli" "done" "$n" "$note" 2>&1)
+else out=$("$BIN/todo-cli" "done" "$n" 2>&1); fi
+status=$?
+
+if [ $status -eq 0 ]; then printf '\n  🎉 \033[32mClosed #%s\033[0m\n' "$n"
+else printf '\n  ⚠️  \033[31m%s\033[0m\n' "$out"; fi
+sleep 1

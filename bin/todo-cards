@@ -1,0 +1,236 @@
+#!/bin/sh
+# todo-cards: my to-do list as a 3×3 grid of cards, the other view of todo-pane.
+# Arrows move, PgUp/PgDn page, `v` goes back to the list. Same cache, same keys.
+set -u
+
+BIN=$(cd "$(dirname "$0")" && pwd)
+STATE="${HERDR_PLUGIN_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-todo}"
+STAMP="$STATE/updated"
+SIDE_FILE="$STATE/side"
+VIEW_FILE="$STATE/view"
+ROWS="$STATE/cards.tsv"
+REFRESH="${TODO_REFRESH:-60}"
+mkdir -p "$STATE"
+echo cards > "$VIEW_FILE"
+
+side=$(cat "$SIDE_FILE" 2>/dev/null || echo all)
+mode=title
+query=""
+searching=0
+sel=0
+count=0
+
+# Rows for the current side, narrowed by the query (every word must match the
+# title, or the label names when searching labels).
+filter() {
+  "$BIN/todo-pane" rows "$side" | LC_ALL=C awk -F '\t' -v q="$query" -v mode="$mode" '
+    BEGIN { n = split(tolower(q), words, " ") }
+    {
+      s = $3
+      if (mode == "labels") { s = ";" $4; gsub(/;[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f] /, " ", s) }
+      s = tolower(s)
+      for (i = 1; i <= n; i++) if (!index(s, words[i])) next
+      print
+    }
+  ' > "$ROWS"
+  count=$(wc -l < "$ROWS" | tr -d ' ')
+  [ "$sel" -lt "$count" ] || sel=$((count > 0 ? count - 1 : 0))
+}
+
+# The real size, from the terminal itself (tput can trust a stale $COLUMNS).
+size() { stty size < /dev/tty 2>/dev/null || echo "24 80"; }
+
+render() {
+  # shellcheck disable=SC2046 # "rows cols", split on purpose
+  set -- $(size); lines=$1; cols=$2
+  stamp=$(cat "$STAMP" 2>/dev/null || echo never)
+  out=$(LC_ALL=C awk -F '\t' -v cols="$cols" -v lines="$lines" -v sel="$sel" -v count="$count" \
+      -v side="$side" -v stamp="$stamp" -v mode="$mode" -v query="$query" -v searching="$searching" '
+    function chars(s,  t) { t = s; gsub(/[\200-\277]/, "", t); return length(t) }
+    function cut(s, n,  out, i, c, k) {
+      k = 0; out = ""
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c < "\200" || c > "\277") { if (++k > n) break }
+        out = out c
+      }
+      return out
+    }
+    function hex(h,  i, v) {
+      v = 0; h = tolower(h)
+      for (i = 1; i <= length(h); i++) v = v * 16 + index("0123456789abcdef", substr(h, i, 1)) - 1
+      return v
+    }
+    function rgb(h) { return hex(substr(h, 1, 2)) ";" hex(substr(h, 3, 2)) ";" hex(substr(h, 5, 2)) }
+    function at(y, x) { return sprintf("\033[%d;%dH", y, x) }
+    function rep(s, n,  o) { o = ""; while (n-- > 0) o = o s; return o }
+    # Word-wraps s to width w into L[1..k], at most m lines, with … if it was cut.
+    function wrap(s, w, m,  n, words, i, line, cand, k) {
+      k = 0; line = ""; n = split(s, words, " ")
+      for (i = 1; i <= n; i++) {
+        if (words[i] == "") continue
+        cand = (line == "") ? words[i] : line " " words[i]
+        if (chars(cand) <= w) { line = cand; continue }
+        if (line != "") L[++k] = line
+        line = words[i]
+        while (chars(line) > w) { L[++k] = cut(line, w); line = substr(line, length(cut(line, w)) + 1) }
+      }
+      if (line != "") L[++k] = line
+      if (k > m) { k = m; L[k] = cut(L[k], w - 1) "…" }
+      return k
+    }
+    function pill(spec, sp, hx, name, c) {
+      sp = index(spec, " "); hx = substr(spec, 1, sp - 1); name = substr(spec, sp + 1)
+      c = rgb(hx); split(c, p, ";")
+      fg = (0.299 * p[1] + 0.587 * p[2] + 0.114 * p[3] > 150) ? "30" : "97"
+      return sprintf("\033[48;2;%sm\033[%sm %s \033[0m", c, fg, name)
+    }
+    BEGIN {
+      top = 3; per = 9
+      ch = int((lines - top - 1) / 3); cw = int((cols - 2) / 3)
+      if (ch < 5) ch = 5
+      w = cw - 1; h = (ch >= 8) ? ch - 1 : ch
+      iw = w - 4; ih = h - 2
+      page = int(sel / per); first = page * per
+      pages = (count > 0) ? int((count - 1) / per) + 1 : 1
+      screen = "\033[H\033[2J"
+    }
+    NR - 1 >= first && NR - 1 < first + per {
+      slot = NR - 1 - first; on = (NR - 1 == sel)
+      y = top + int(slot / 3) * ch; x = 2 + (slot % 3) * cw
+      edge = ($2 == "home") ? "2da44e" : ($2 == "biz") ? "8250df" : ($2 == "work") ? "1f6feb" : "6e7781"
+      if (on) { b = "\033[1;38;2;240;179;126m"; tl = "┏"; tr = "┓"; bl = "┗"; br = "┛"; hz = "━"; vt = "┃" }
+      else    { b = "\033[38;2;" rgb(edge) "m"; tl = "╭"; tr = "╮"; bl = "╰"; br = "╯"; hz = "─"; vt = "│" }
+
+      # Content first, then the border on top, so anything too wide is covered.
+      k = 0
+      icon = ($2 == "home") ? "🏠" : ($2 == "biz") ? "🦍" : ($2 == "work") ? "🏢" : "📌"
+      row[++k] = icon " \033[2m#" $1 "\033[0m"
+      n = wrap($3, iw, (ih >= 7) ? 3 : 2)
+      for (i = 1; i <= n && k < ih; i++) row[++k] = (on ? "\033[1;38;2;240;179;126m" : "\033[1m") L[i] "\033[0m"
+      if ($4 != "" && k < ih) {
+        m = split($4, specs, ";"); pl = ""; used = 0
+        for (i = 1; i <= m; i++) {
+          nm = substr(specs[i], index(specs[i], " ") + 1)
+          need = chars(nm) + 3
+          if (used + need > iw) break
+          pl = pl (used ? " " : "") pill(specs[i]); used += need + 1
+        }
+        row[++k] = pl
+      }
+      if ($5 != "" && k + 1 < ih) {
+        row[++k] = ""
+        n = wrap($5, iw, ih - k)
+        for (i = 1; i <= n; i++) row[++k] = "\033[2m" L[i] "\033[0m"
+      }
+      for (i = 1; i <= ih; i++) screen = screen at(y + i, x + 1) rep(" ", w - 2)
+      for (i = 1; i <= k; i++) screen = screen at(y + i, x + 2) row[i]
+      screen = screen b at(y, x) tl rep(hz, w - 2) tr
+      for (i = 1; i <= ih; i++) screen = screen at(y + i, x) vt at(y + i, x + w - 1) vt
+      screen = screen at(y + h - 1, x) bl rep(hz, w - 2) br "\033[0m"
+    }
+    END {
+      what = (side == "home") ? "🏠 Home" : (side == "biz") ? "🦍 SkillfulGorilla" : (side == "work") ? "🏢 Work" : "📋 Everything"
+      when = (stamp == "offline") ? "📴 offline, retrying" : "🔄 " stamp
+      head = "\033[1;38;2;130;80;223m 🃏 Cards\033[0m · " what " · " count " to do · " when
+      if (pages > 1) head = head " · page " page + 1 "/" pages
+      if (query != "" || searching)
+        head = head "   \033[38;2;9;105;218m" (mode == "labels" ? "🔖 labels" : "🔍 title") ": " query (searching ? "\033[5m▏" : "") "\033[0m"
+      screen = screen at(1, 2) head
+      if (count == 0) screen = screen at(int(lines / 2), int(cols / 2) - 8) (query == "" ? "Nothing to do 🎉" : "No matches 🤷")
+      if (searching) foot = "type to filter · ⌫ delete · ctrl-u clear · ⏎ or esc done · ←↑↓→ move"
+      else foot = "←↑↓→ move · PgUp/PgDn page · ⏎ details · / title · l labels · v ☰ list · h 🏠 · s 🦍 · w 🏢 · a all · n new · x done · o browser · r refresh · c clear · q quit"
+      screen = screen at(lines, 2) "\033[38;2;110;119;129m" cut(foot, cols - 3) "\033[0m"
+      printf "%s", screen
+    }
+  ' "$ROWS")
+  printf '%s' "$out"
+}
+
+selected() { sed -n "$((sel + 1))p" "$ROWS" | cut -f 1; }
+
+# Line wrap off while drawing, so a wide emoji can never scroll the grid.
+raw() { stty -icanon -echo min 0 time 10; printf '\033[?25l\033[?7l'; }
+cooked() { stty "$saved"; printf '\033[?25h\033[?7h'; }
+leave() { cooked; printf '\033[?1049l'; }
+
+# Reads one key, as hex. Empty after a second with no key, so we can refresh.
+key() {
+  k=$(dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')
+  if [ "$k" = 1b ]; then
+    stty time 1
+    k="$k$(dd bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+    stty time 10
+  fi
+}
+
+# Starts a live search: every key filters the cards straight away.
+search() { mode=$1; [ "$searching" = 1 ] || { [ "$mode" = "$last_mode" ] || query=""; }; last_mode=$mode; searching=1; sel=0; filter; }
+last_mode=title
+
+# Runs a command full screen (details, add, done), then comes back.
+run() { cooked; "$@"; raw; }
+
+saved=$(stty -g)
+trap leave EXIT
+trap 'exit 0' INT TERM
+printf '\033[?1049h'
+raw
+filter
+render
+last=0   # so the first idle second fetches: show the cache now, fresh data straight after
+shape=$(size)
+
+while :; do
+  key
+  now=$(date +%s)
+  case "$k" in
+    "")
+      if [ $((now - last)) -ge "$REFRESH" ]; then
+        "$BIN/todo-pane" fetch; last=$now; filter; render
+      elif [ "$(size)" != "$shape" ]; then
+        shape=$(size); render
+      fi
+      continue
+      ;;
+  esac
+  if [ "$searching" = 1 ]; then
+    case "$k" in
+      0a|0d|1b) searching=0 ;;                  # Enter or Esc: done, keep the filter
+      7f|08) query=${query%?}; sel=0; filter ;; # Backspace
+      15) query=""; sel=0; filter ;;            # ctrl-u
+      1b5b*) ;;                                 # arrows still move, below
+      2[0-9a-f]|[3-6][0-9a-f]|7[0-9a-e])        # printable ASCII
+        # shellcheck disable=SC2059 # the format is the octal escape for this key
+        query="$query$(printf "\\$(printf '%03o' "0x$k")")"; sel=0; filter ;;
+      *) continue ;;
+    esac
+    case "$k" in 1b5b*) ;; *) render; continue ;; esac
+  fi
+  case "$k" in
+    1b5b43) sel=$((sel + 1)) ;;                 # →
+    1b5b44) sel=$((sel - 1)) ;;                 # ←
+    1b5b42) sel=$((sel + 3)) ;;                 # ↓
+    1b5b41) sel=$((sel - 3)) ;;                 # ↑
+    1b5b367e) sel=$((sel + 9)) ;;               # PgDn
+    1b5b357e) sel=$((sel - 9)) ;;               # PgUp
+    0a|0d) n=$(selected); [ -n "$n" ] && run sh -c 'GH_FORCE_TTY=1 "$1/todo-cli" show "$2" | less -R' sh "$BIN" "$n" ;;
+    2f) search title ;;                         # /
+    6c) search labels ;;                        # l
+    63) query=""; filter ;;                     # c
+    68) side=home; echo home > "$SIDE_FILE"; sel=0; filter ;;   # h
+    73) side=biz; echo biz > "$SIDE_FILE"; sel=0; filter ;;     # s
+    77) side=work; echo work > "$SIDE_FILE"; sel=0; filter ;;   # w
+    61) side=all; echo all > "$SIDE_FILE"; sel=0; filter ;;     # a
+    6e) run "$BIN/todo-add"; "$BIN/todo-pane" fetch; last=$now; filter ;;   # n
+    78) n=$(selected); [ -n "$n" ] && { run "$BIN/todo-done" "$n"; "$BIN/todo-pane" fetch; last=$now; filter; } ;;  # x
+    6f) n=$(selected); [ -n "$n" ] && "$BIN/todo-cli" web "$n" >/dev/null 2>&1 ;;  # o
+    72) "$BIN/todo-pane" fetch; last=$now; filter ;;   # r
+    76) leave; trap - EXIT; echo list > "$VIEW_FILE"; exec "$BIN/todo-pane" --list ;;  # v
+    71|1b) exit 0 ;;                            # q, Esc
+    *) continue ;;
+  esac
+  [ "$sel" -ge 0 ] || sel=0
+  [ "$sel" -lt "$count" ] || sel=$((count > 0 ? count - 1 : 0))
+  render
+done
